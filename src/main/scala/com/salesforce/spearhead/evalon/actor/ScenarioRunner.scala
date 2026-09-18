@@ -50,15 +50,17 @@ object ScenarioRunner:
   // Event source emissions
   case class EventSourceEmission(sourceName: String, events: List[Event]) extends Command
 
-  // The evaluated agent's step failed (thrown, null/failed CompletionStage, exhausted retries).
-  case class AgentFailed(participant: String, conversation: String, cause: Throwable) extends Command
+  // A participant's async work failed terminally (thrown, null/failed CompletionStage, exhausted
+  // retries): the evaluated agent's step, a simulated participant's LLM call, or an event source's.
+  case class ParticipantFailed(participant: String, cause: Throwable) extends Command
 
-  /** Outcome of a simulation. Both arms carry a transcript: `Failed` holds whatever was recorded up
-    * to the point the evaluated agent's step failed.
-    */
+  /**
+   * Outcome of a simulation. Both arms carry a transcript: `Failed` holds whatever was recorded up
+   * to the point a participant failed, and names the participant that failed.
+   */
   enum SimulationResult:
     case Completed(transcript: Transcript)
-    case Failed(transcript: Transcript, cause: Throwable)
+    case Failed(transcript: Transcript, cause: Throwable, participant: String)
 
   /** Internal state for the running simulation. */
   private case class RunState(
@@ -166,8 +168,8 @@ object ScenarioRunner:
     case (ctx, msg: EventSourceEmission) =>
       ctx.log.warn("EventSourceEmission before Run, ignoring: {}", msg)
       Behaviors.same
-    case (ctx, msg: AgentFailed) =>
-      ctx.log.warn("AgentFailed before Run, ignoring: {}", msg)
+    case (ctx, msg: ParticipantFailed) =>
+      ctx.log.warn("ParticipantFailed before Run, ignoring: {}", msg)
       Behaviors.same
   }
 
@@ -207,9 +209,9 @@ object ScenarioRunner:
         }
       running(s)
 
-    case (_, AgentFailed(_, _, cause)) =>
+    case (_, ParticipantFailed(participant, cause)) =>
       // Fail the whole simulation fast, carrying the partial transcript for debugging.
-      state.replyTo ! SimulationResult.Failed(state.transcript, cause)
+      state.replyTo ! SimulationResult.Failed(state.transcript, cause, participant)
       Behaviors.stopped
 
     case (ctx, msg: Run) =>

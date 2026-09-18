@@ -144,11 +144,11 @@ object EvaluatedAgent:
       val newPending = pending.copy(events = pending.events ++ systemEvents)
       generating(agent, runner, agentName, directConversations, newHistory, newPending)
 
-    case (ctx, AgentResult(Failure(e), conversation)) =>
+    case (ctx, AgentResult(Failure(e), _)) =>
       // A failed step is an infrastructure failure, not agent behavior. Surface it to the runner
       // so the run fails fast, instead of swallowing it as an empty send.
       ctx.log.error("Agent step failed", e)
-      runner ! ScenarioRunner.AgentFailed(agentName, conversation, e)
+      runner ! ScenarioRunner.ParticipantFailed(agentName, e)
       Behaviors.stopped
 
     case (ctx, AgentResult(Success(action), conversation)) =>

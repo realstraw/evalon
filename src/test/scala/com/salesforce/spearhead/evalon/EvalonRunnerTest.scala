@@ -117,7 +117,7 @@ class EvalonRunnerTest extends AnyFunSuite with BeforeAndAfterAll:
   }
 
   test("a successful empty send is treated as silence, not an agent failure") {
-    // Empty content is a real "say nothing" — it must not be surfaced as AgentStepFailedException.
+    // Empty content is a real "say nothing": it must not become AgentStepFailedException.
     // With nothing delivered, the conversation stalls and the run times out instead.
     val agent: SimpleAgent = (_, _, _) => CompletableFuture.completedFuture(AgentReply.send(""))
     val options = EvalonRunOptions()
@@ -130,7 +130,45 @@ class EvalonRunnerTest extends AnyFunSuite with BeforeAndAfterAll:
     assert(!thrown.isInstanceOf[AgentStepFailedException])
   }
 
-  private def scenario(name: String): Scenario =
+  test("a simulated participant's LLM failure fails the run as a harness failure") {
+    // The failing participant is not the agent under test, so it surfaces as a harness failure.
+    val llm: Llm = _ => CompletableFuture.failedFuture(new IllegalStateException("llm down"))
+    val agent: SimpleAgent = (_, _, _) => CompletableFuture.completedFuture(AgentReply.end())
+
+    val ex = intercept[SimulationFailedException] {
+      evalon.runSimple(scenario("sim-llm-fail"), agent, llm, failFastOptions)
+    }
+    assert(ex.getParticipant == "end_user")
+    assert(ex.getCause.getMessage == "llm down")
+  }
+
+  test("an event source's LLM failure fails the run as a harness failure") {
+    val eventSource = EventSourceConfig(
+      name = "case_events",
+      sourceType = "simulated",
+      description = "a case management system",
+      emits = List(EventEmitConfig("case_created", Map("id" -> "string")))
+    )
+    // Fail only the event source's LLM call; keep the user and agent talking (never ending) so the
+    // event-source failure is the only thing that can stop the run.
+    val llm: Llm = prompt =>
+      if prompt.contains("simulated event source") then
+        CompletableFuture.failedFuture(new IllegalStateException("event source down"))
+      else CompletableFuture.completedFuture("I need help with my order.")
+    val agent: SimpleAgent =
+      (_, _, _) => CompletableFuture.completedFuture(AgentReply.send("Working on it."))
+
+    val ex = intercept[SimulationFailedException] {
+      evalon.runSimple(scenario("es-llm-fail", List(eventSource)), agent, llm, failFastOptions)
+    }
+    assert(ex.getParticipant == "case_events")
+    assert(ex.getCause.getMessage == "event source down")
+  }
+
+  private def scenario(
+      name: String,
+      eventSources: List[EventSourceConfig] = Nil
+  ): Scenario =
     Scenario(
       name = name,
       description = "shared-system test",
@@ -141,5 +179,6 @@ class EvalonRunnerTest extends AnyFunSuite with BeforeAndAfterAll:
       conversations = List(
         ConversationConfig("chat", List("end_user", "agent"), initiatedBy = Some("end_user"))
       ),
+      eventSources = eventSources,
       evalCriteria = List(EvalCriterion("ok", 1.0))
     )
