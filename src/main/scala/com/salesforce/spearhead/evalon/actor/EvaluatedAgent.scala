@@ -17,7 +17,7 @@
 
 package com.salesforce.spearhead.evalon.actor
 
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 
 import org.apache.pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
@@ -34,7 +34,10 @@ import com.salesforce.spearhead.evalon.model.{Action, Event, HistoryEntry}
   */
 object EvaluatedAgent:
 
-  case class AgentResult private[EvaluatedAgent] (action: Action, conversation: String)
+  /** Outcome of an in-flight step, piped back to this actor. A `Failure` carries the cause so it
+    * can be surfaced to the runner rather than swallowed.
+    */
+  case class AgentResult private[EvaluatedAgent] (result: Try[Action], conversation: String)
 
   /** Pending work accumulated while a step is in flight.
     *
@@ -141,7 +144,14 @@ object EvaluatedAgent:
       val newPending = pending.copy(events = pending.events ++ systemEvents)
       generating(agent, runner, agentName, directConversations, newHistory, newPending)
 
-    case (ctx, AgentResult(action, conversation)) =>
+    case (ctx, AgentResult(Failure(e), conversation)) =>
+      // A failed step is an infrastructure failure, not agent behavior. Surface it to the runner
+      // so the run fails fast, instead of swallowing it as an empty send.
+      ctx.log.error("Agent step failed", e)
+      runner ! ScenarioRunner.AgentFailed(agentName, conversation, e)
+      Behaviors.stopped
+
+    case (ctx, AgentResult(Success(action), conversation)) =>
       runner ! ScenarioRunner.ParticipantResponse(agentName, conversation, action)
       val newHistory = recordAction(history, agentName, conversation, action)
 
@@ -185,10 +195,5 @@ object EvaluatedAgent:
       pending: Pending,
       ctx: ActorContext[Participant.Command | AgentResult]
   ): Behavior[Participant.Command | AgentResult] =
-    ctx.pipeToSelf(agent.step(history, events, respondIn)) {
-      case Success(action) => AgentResult(action, respondIn)
-      case Failure(e) =>
-        ctx.log.error("Agent step failed", e)
-        AgentResult(Action.send(agentName, ""), respondIn)
-    }
+    ctx.pipeToSelf(agent.step(history, events, respondIn))(AgentResult(_, respondIn))
     generating(agent, runner, agentName, directConversations, history, pending)

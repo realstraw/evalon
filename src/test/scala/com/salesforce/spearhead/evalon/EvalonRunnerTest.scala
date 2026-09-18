@@ -19,6 +19,7 @@ package com.salesforce.spearhead.evalon
 
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.Await
 import scala.concurrent.duration.*
@@ -59,6 +60,74 @@ class EvalonRunnerTest extends AnyFunSuite with BeforeAndAfterAll:
     assert(second.getScenarioName == "two")
     assert(first.getSummary == "ok")
     assert(second.getSummary == "ok")
+  }
+
+  // A judge LLM that scores every run "ok", and drives the simulated user to say something
+  // (so the evaluated agent actually gets a turn) rather than ending immediately.
+  private val judgeAndChatLlm: Llm = prompt =>
+    val text =
+      if prompt.contains("expert evaluator") then
+        """{"criteria":[{"passed":true,"score":1.0,"reasoning":"ok"}],"summary":"ok"}"""
+      else "I need help with my order."
+    CompletableFuture.completedFuture(text)
+
+  private val failFastOptions = EvalonRunOptions()
+    .withSimulationTimeout(Duration.ofSeconds(15))
+    .withJudgeTimeout(Duration.ofSeconds(5))
+
+  test("agent step returning null fails the run instead of being swallowed") {
+    val agent: SimpleAgent = (_, _, _) => null
+    val ex = intercept[AgentStepFailedException] {
+      evalon.runSimple(scenario("null-step"), agent, judgeAndChatLlm, failFastOptions)
+    }
+    assert(ex.getCause.isInstanceOf[NullPointerException])
+  }
+
+  test("agent step throwing fails the run") {
+    val agent: SimpleAgent = (_, _, _) => throw new IllegalStateException("boom")
+    val ex = intercept[AgentStepFailedException] {
+      evalon.runSimple(scenario("throwing-step"), agent, judgeAndChatLlm, failFastOptions)
+    }
+    assert(ex.getCause.getMessage == "boom")
+  }
+
+  test("agent step completing exceptionally fails the run") {
+    val agent: SimpleAgent = (_, _, _) =>
+      CompletableFuture.failedFuture[AgentReply](new IllegalStateException("boom"))
+    val ex = intercept[AgentStepFailedException] {
+      evalon.runSimple(scenario("failed-stage"), agent, judgeAndChatLlm, failFastOptions)
+    }
+    assert(ex.getCause.getMessage == "boom")
+  }
+
+  test("a successful non-empty send is recorded and the run is scored") {
+    val calls = new AtomicInteger()
+    val agent: SimpleAgent = (_, _, _) =>
+      val reply =
+        if calls.getAndIncrement() == 0 then AgentReply.send("Here is your answer.")
+        else AgentReply.end()
+      CompletableFuture.completedFuture(reply)
+
+    val result = evalon.runSimple(scenario("send"), agent, judgeAndChatLlm, failFastOptions)
+
+    assert(result.getSummary == "ok")
+    assert(result.scalaTranscript.messages.exists { m =>
+      m.sender == "agent" && m.content == "Here is your answer."
+    })
+  }
+
+  test("a successful empty send is treated as silence, not an agent failure") {
+    // Empty content is a real "say nothing" — it must not be surfaced as AgentStepFailedException.
+    // With nothing delivered, the conversation stalls and the run times out instead.
+    val agent: SimpleAgent = (_, _, _) => CompletableFuture.completedFuture(AgentReply.send(""))
+    val options = EvalonRunOptions()
+      .withSimulationTimeout(Duration.ofSeconds(2))
+      .withJudgeTimeout(Duration.ofSeconds(2))
+
+    val thrown = intercept[Throwable] {
+      evalon.runSimple(scenario("empty-send"), agent, judgeAndChatLlm, options)
+    }
+    assert(!thrown.isInstanceOf[AgentStepFailedException])
   }
 
   private def scenario(name: String): Scenario =
