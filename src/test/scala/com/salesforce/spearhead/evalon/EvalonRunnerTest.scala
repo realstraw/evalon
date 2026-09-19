@@ -189,6 +189,16 @@ class EvalonRunnerTest extends AnyFunSuite with BeforeAndAfterAll:
     assert(ex.getCause.isInstanceOf[NullPointerException])
   }
 
+  test("a raw agent whose future completes with a null action fails the run") {
+    // Distinct from a null future: the future is fine but yields a null action, which would
+    // otherwise MatchError in recordAction. It must be surfaced as a step failure.
+    val agent = rawAgent(Future.successful(null))
+    val ex = intercept[AgentStepFailedException] {
+      evalon.run(scenario("raw-null-action"), agent, judgeAndChatLlm, failFastOptions)
+    }
+    assert(ex.getCause.isInstanceOf[NullPointerException])
+  }
+
   test("a participant LLM that throws synchronously fails the run as a harness failure") {
     val llm: Llm = _ => throw new IllegalStateException("sync llm boom")
     val agent: SimpleAgent = (_, _, _) => CompletableFuture.completedFuture(AgentReply.end())

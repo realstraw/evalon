@@ -153,6 +153,14 @@ object EvaluatedAgent:
       runner ! ScenarioRunner.ParticipantFailed(agentName, e)
       Behaviors.stopped
 
+    case (ctx, AgentResult(Success(null), _)) =>
+      // A future that completes with a null action is a broken step, not a real action. Surface it
+      // as a step failure rather than letting the null reach recordAction as a MatchError.
+      val e = NullPointerException("Agent.step future completed with a null action")
+      ctx.log.error("Agent step returned a null action", e)
+      runner ! ScenarioRunner.ParticipantFailed(agentName, e)
+      Behaviors.stopped
+
     case (ctx, AgentResult(Success(action), conversation)) =>
       runner ! ScenarioRunner.ParticipantResponse(agentName, conversation, action)
       val newHistory = recordAction(history, agentName, conversation, action)
