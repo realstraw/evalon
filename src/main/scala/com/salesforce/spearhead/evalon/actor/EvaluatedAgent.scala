@@ -17,6 +17,8 @@
 
 package com.salesforce.spearhead.evalon.actor
 
+import scala.concurrent.Future
+import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
 import org.apache.pekko.actor.typed.scaladsl.{ActorContext, Behaviors}
@@ -195,5 +197,21 @@ object EvaluatedAgent:
       pending: Pending,
       ctx: ActorContext[Participant.Command | AgentResult]
   ): Behavior[Participant.Command | AgentResult] =
-    ctx.pipeToSelf(agent.step(history, events, respondIn))(AgentResult(_, respondIn))
+    ctx.pipeToSelf(safeStep(agent, history, events, respondIn))(AgentResult(_, respondIn))
     generating(agent, runner, agentName, directConversations, history, pending)
+
+  /** Invoke the agent's step, capturing a synchronous throw or a null result as a failed Future.
+    * `pipeToSelf` only routes failures that reach it as a `Future`; a raw `Agent` that throws in
+    * `step` before returning would otherwise escape the fail-fast path and kill the actor.
+    */
+  private def safeStep(
+      agent: Agent,
+      history: List[HistoryEntry],
+      events: List[Event],
+      respondIn: String
+  ): Future[Action] =
+    try
+      val result = agent.step(history, events, respondIn)
+      if result == null then Future.failed(NullPointerException("Agent.step returned null"))
+      else result
+    catch case NonFatal(e) => Future.failed(e)

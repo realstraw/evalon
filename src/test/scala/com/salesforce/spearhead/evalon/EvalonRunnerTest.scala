@@ -21,13 +21,13 @@ import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicInteger
 
-import scala.concurrent.Await
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration.*
 
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.salesforce.spearhead.evalon.agent.{AgentReply, SimpleAgent}
+import com.salesforce.spearhead.evalon.agent.{Agent, AgentReply, SimpleAgent}
 import com.salesforce.spearhead.evalon.llm.Llm
 import com.salesforce.spearhead.evalon.model.*
 
@@ -163,6 +163,50 @@ class EvalonRunnerTest extends AnyFunSuite with BeforeAndAfterAll:
     }
     assert(ex.getParticipant == "case_events")
     assert(ex.getCause.getMessage == "event source down")
+  }
+
+  // A raw Agent (implementing the trait directly, not via the SimpleAgent bridge) whose step body
+  // is by-name, so it can throw synchronously or return null before yielding a Future.
+  private def rawAgent(body: => Future[Action]): Agent =
+    new Agent:
+      def step(h: List[HistoryEntry], e: List[Event], r: String): Future[Action] = body
+
+  test("a raw agent whose step throws synchronously fails the run") {
+    // The throw happens before a Future exists, so pipeToSelf never sees it. It must still be
+    // caught and surfaced, not left to kill the actor and stall the run.
+    val agent = rawAgent(throw new IllegalStateException("sync boom"))
+    val ex = intercept[AgentStepFailedException] {
+      evalon.run(scenario("raw-sync-throw"), agent, judgeAndChatLlm, failFastOptions)
+    }
+    assert(ex.getCause.getMessage == "sync boom")
+  }
+
+  test("a raw agent that returns a null future fails the run") {
+    val agent = rawAgent(null)
+    val ex = intercept[AgentStepFailedException] {
+      evalon.run(scenario("raw-null"), agent, judgeAndChatLlm, failFastOptions)
+    }
+    assert(ex.getCause.isInstanceOf[NullPointerException])
+  }
+
+  test("a participant LLM that throws synchronously fails the run as a harness failure") {
+    val llm: Llm = _ => throw new IllegalStateException("sync llm boom")
+    val agent: SimpleAgent = (_, _, _) => CompletableFuture.completedFuture(AgentReply.end())
+    val ex = intercept[SimulationFailedException] {
+      evalon.runSimple(scenario("raw-sync-llm"), agent, llm, failFastOptions)
+    }
+    assert(ex.getParticipant == "end_user")
+    assert(ex.getCause.getMessage == "sync llm boom")
+  }
+
+  test("a participant LLM that returns null fails the run as a harness failure") {
+    val llm: Llm = _ => null
+    val agent: SimpleAgent = (_, _, _) => CompletableFuture.completedFuture(AgentReply.end())
+    val ex = intercept[SimulationFailedException] {
+      evalon.runSimple(scenario("raw-null-llm"), agent, llm, failFastOptions)
+    }
+    assert(ex.getParticipant == "end_user")
+    assert(ex.getCause.isInstanceOf[NullPointerException])
   }
 
   private def scenario(
